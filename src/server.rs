@@ -105,9 +105,11 @@ impl<
                             Server::invalid_address(&conn)
 
                         } else if self.lobbies.contains_key(&id) {
+                            self.set_lobby(&conn, Some(id.clone()));
                             self.join_lobby(&conn, id, secret)
 
                         } else {
+                            self.set_lobby(&conn, Some(id.clone()));
                             self.create_lobby(&conn, id, secret)
                         }
                     },
@@ -124,17 +126,27 @@ impl<
                         },
                         Err(event) => event
                     },
-                    Message::LobbyLeaveAction => match self.get_lobby(&conn) {
-                        Ok(lobby) => if lobby.owned_by(&conn) {
-                            println!("[Lobby] \"{}\" closed by {}", lobby.id, conn);
-                            lobby.close(&conn)
+                    Message::LobbyLeaveAction => {
+                        let (left, event) = match self.get_lobby(&conn) {
+                            Ok(lobby) => if lobby.owned_by(&conn) {
+                                println!("[Lobby] \"{}\" closed by {}", lobby.id, conn);
+                                let left = lobby.connections.clone();
+                                (left, lobby.close(&conn))
 
-                        } else {
-                            println!("[Lobby] \"{}\" left by {}", lobby.id, conn);
-                            lobby.leave(&conn)
-                        },
-                        Err(event) => event
-                    },
+                            } else {
+                                println!("[Lobby] \"{}\" left by {}", lobby.id, conn);
+                                (vec![conn.clone()], lobby.leave(&conn))
+                            },
+                            Err(event) => {
+                                println!("Leave failed");
+                                (Vec::new(), event)
+                            }
+                        };
+                        for conn in left {
+                            self.set_lobby(&conn, None);
+                        }
+                        event
+                    }
                     Message::LobbyStartAction => match self.get_lobby_if_owner(&conn) {
                         Ok(lobby) => {
                             println!("[Lobby] \"{}\" started by {}", lobby.id, conn);
@@ -216,7 +228,7 @@ impl<
                 Recipient::Lobby(id) => {
                     if let Some(lobby) = self.lobbies.get(&id) {
                         for conn in &lobby.connections {
-                            if let Some(conn) = self.connections.get_mut(&conn.addr) {
+                            if let Some(conn) = self.connections.get_mut(&conn.tcp_addr) {
                                 conn.send(msg.clone());
                             }
                         }
@@ -231,34 +243,44 @@ impl<
         }
     }
 
+    fn set_lobby(&mut self, conn: &ConnectionInfo<LobbyId, Identifier>, id: Option<LobbyId>) {
+        if let Some(conn) = self.connections.get_mut(&conn.tcp_addr) {
+            conn.lobby_id = id;
+        }
+    }
+
     fn join_lobby(&mut self, conn: &ConnectionInfo<LobbyId, Identifier>, id: LobbyId, secret: Option<LobbySecret>) -> Response<LobbyId, LobbySecret, Identifier, Key, Value> {
         if let Some(lobby) = self.lobbies.get_mut(&id) {
             if lobby.secret == secret {
 
-                let mut r: Vec<Response<LobbyId, LobbySecret, Identifier, Key, Value>> = lobby.connections.iter().map(|c| {
-                    Server::connection_event(conn, Message::LobbyJoinEvent {
+                let mut r: Vec<Response<LobbyId, LobbySecret, Identifier, Key, Value>> = vec![
+                    Server::lobby_event(id.clone(), Message::LobbyJoinEvent {
+                        id: id.clone(),
+                        addr: conn.udp_address.expect("Connection without UDP joined lobby"),
+                        ident: conn.ident.clone(),
+                        is_local: true,
+                        is_owner: false
+                    })
+                ];
+
+                for c in &lobby.connections {
+                    r.push(Server::connection_event(conn, Message::LobbyJoinEvent {
+                        id: id.clone(),
                         addr: c.udp_address.expect("Connection without UDP address in lobby"),
                         ident: c.ident.clone(),
                         is_local: false,
                         is_owner: lobby.owned_by(c)
-                    })
-
-                }).collect();
-
-                lobby.connections.push(conn.clone());
+                    }));
+                }
 
                 for (key, &(ref value, _)) in &lobby.preferences {
                     r.push(Server::connection_event(conn, Message::LobbyPreferenceEvent(lobby.id.clone(), key.clone(), value.clone())));
                 }
 
+                lobby.connections.push(conn.clone());
+
                 println!("[Lobby] \"{}\" joined by {}", id, conn);
 
-                r.push(Server::lobby_event(id.clone(), Message::LobbyJoinEvent {
-                    addr: conn.udp_address.expect("Connection without UDP joined lobby"),
-                    ident: conn.ident.clone(),
-                    is_local: true,
-                    is_owner: false
-                }));
                 Response::Many(r)
 
             } else {
@@ -287,6 +309,7 @@ impl<
         Response::Many(vec![
             Server::public_event(Message::LobbyCreateEvent(id.clone())),
             Server::connection_event(conn, Message::LobbyJoinEvent {
+                id: id.clone(),
                 addr: conn.udp_address.expect("Connection without UDP created lobby"),
                 ident: conn.ident.clone(),
                 is_local: true,
@@ -341,7 +364,7 @@ impl<
     }
 
     fn connection_event(conn: &ConnectionInfo<LobbyId, Identifier>, event: Message<LobbyId, LobbySecret, Identifier, Key, Value>) -> Response<LobbyId, LobbySecret, Identifier, Key, Value> {
-        Response::Single(Recipient::Connection(conn.addr), event)
+        Response::Single(Recipient::Connection(conn.tcp_addr), event)
     }
 
     fn lobby_event(id: LobbyId, event: Message<LobbyId, LobbySecret, Identifier, Key, Value>) -> Response<LobbyId, LobbySecret, Identifier, Key, Value> {
@@ -353,15 +376,15 @@ impl<
     }
 
     fn invalid_address(conn: &ConnectionInfo<LobbyId, Identifier>) -> Response<LobbyId, LobbySecret, Identifier, Key, Value> {
-        Response::Single(Recipient::Connection(conn.addr), Message::InvalidAddress)
+        Response::Single(Recipient::Connection(conn.tcp_addr), Message::InvalidAddress)
     }
 
     fn invalid_action(conn: &ConnectionInfo<LobbyId, Identifier>) -> Response<LobbyId, LobbySecret, Identifier, Key, Value> {
-        Response::Single(Recipient::Connection(conn.addr), Message::InvalidAction)
+        Response::Single(Recipient::Connection(conn.tcp_addr), Message::InvalidAction)
     }
 
     fn invalid_lobby(conn: &ConnectionInfo<LobbyId, Identifier>, id: LobbyId) -> Response<LobbyId, LobbySecret, Identifier, Key, Value> {
-        Response::Single(Recipient::Connection(conn.addr), Message::InvalidLobby(id))
+        Response::Single(Recipient::Connection(conn.tcp_addr), Message::InvalidLobby(id))
     }
 
 }
@@ -386,7 +409,7 @@ enum Recipient<LobbyId: NetworkProperty> {
 
 #[derive(Clone)]
 struct ConnectionInfo<LobbyId: NetworkProperty, Identifier: NetworkProperty> {
-    addr: SocketAddr,
+    tcp_addr: SocketAddr,
     udp_address: Option<SocketAddr>,
     lobby_id: Option<LobbyId>,
     ident: Identifier,
@@ -395,7 +418,7 @@ struct ConnectionInfo<LobbyId: NetworkProperty, Identifier: NetworkProperty> {
 
 impl<LobbyId: NetworkProperty, Identifier: NetworkProperty> fmt::Display for ConnectionInfo<LobbyId, Identifier> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "<\"{}\"@{}@{:?}>", self.ident, self.addr, self.udp_address)
+        write!(f, "<\"{}\"@{}@{:?}>", self.ident, self.tcp_addr, self.udp_address)
     }
 }
 
@@ -444,7 +467,7 @@ impl<
 
     fn info(&self) -> ConnectionInfo<LobbyId, Identifier> {
         ConnectionInfo {
-            addr: self.addr,
+            tcp_addr: self.addr,
             lobby_id: self.lobby_id.clone(),
             udp_address: self.udp_address.clone(),
             token: self.token,
@@ -464,7 +487,9 @@ impl<
             Ok(bytes) => {
                 if bytes == 0 {
                     self.close();
-                    messages.push((self.info(), Message::LobbyLeaveAction));
+                    if self.ident.is_some() {
+                        messages.push((self.info(), Message::LobbyLeaveAction));
+                    }
 
                 } else {
                     let mut offset = 0;
@@ -490,7 +515,9 @@ impl<
             },
             Err(err) => if err.kind() != ErrorKind::WouldBlock {
                 self.close();
-                messages.push((self.info(), Message::LobbyLeaveAction));
+                if self.ident.is_some() {
+                    messages.push((self.info(), Message::LobbyLeaveAction));
+                }
             }
         };
         messages
@@ -502,7 +529,7 @@ impl<
     }
 
     fn close(&mut self) {
-        println!("[Connection] {} left", self.addr);
+        println!("[Connection] {} disconnected", self.addr);
         self.open = false;
     }
 
@@ -534,7 +561,7 @@ impl<
 > Lobby<LobbyId, LobbySecret, Identifier, Key, Value> {
 
     fn owned_by(&self, conn: &ConnectionInfo<LobbyId, Identifier>) -> bool {
-        self.owner.addr == conn.addr
+        self.owner.token == conn.token
     }
 
     fn info(&self, conn: &ConnectionInfo<LobbyId, Identifier>) -> Response<LobbyId, LobbySecret, Identifier, Key, Value> {
@@ -558,17 +585,17 @@ impl<
     }
 
     fn leave(&mut self, conn: &ConnectionInfo<LobbyId, Identifier>) -> Response<LobbyId, LobbySecret, Identifier, Key, Value> {
-        self.connections.retain(|c| c.addr != conn.addr);
+        self.connections.retain(|c| c.token != conn.token);
         Response::Many(vec![
-            Server::connection_event(conn, Message::LobbyLeaveEvent(conn.addr)),
-            Server::lobby_event(self.id.clone(), Message::LobbyLeaveEvent(conn.addr))
+            Server::connection_event(conn, Message::LobbyLeaveEvent(conn.udp_address.expect("Connection without UDP left lobby"))),
+            Server::lobby_event(self.id.clone(), Message::LobbyLeaveEvent(conn.udp_address.expect("Connection without UDP left lobby")))
         ])
     }
 
     fn close(&mut self, conn: &ConnectionInfo<LobbyId, Identifier>) -> Response<LobbyId, LobbySecret, Identifier, Key, Value> {
         self.open = false;
         let mut r: Vec<Response<LobbyId, LobbySecret, Identifier, Key, Value>> = self.connections.iter().map(|c| {
-            Server::connection_event(conn, Message::LobbyLeaveEvent(c.addr))
+            Server::connection_event(conn, Message::LobbyLeaveEvent(c.udp_address.expect("Connection without UDP left lobby")))
 
         }).collect();
         r.push(Server::public_event(Message::LobbyDestroyEvent(self.id.clone())));

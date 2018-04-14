@@ -85,6 +85,7 @@ enum Message<T, S, I, K, V> where T: NetworkProperty,
     LobbyLeaveAction,
     LobbyStartAction,
     LobbyJoinEvent {
+        id: T,
         addr: SocketAddr,
         ident: I,
         is_local: bool,
@@ -105,6 +106,6 @@ enum Message<T, S, I, K, V> where T: NetworkProperty,
 
 
 // Re-Exports ------------------------------------------------------------------
-pub use self::client::Client;
+pub use self::client::{Client, Event};
 pub use self::server::Server;
 
