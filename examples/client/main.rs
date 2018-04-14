@@ -1,43 +1,86 @@
+// Copyright (c) 2018 Ivo Wetzel
+
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+
+// Crates ---------------------------------------------------------------------
 extern crate lbs;
 
+
+// STD Dependencies -----------------------------------------------------------
+use std::env;
 use std::thread;
 use std::time::Duration;
 
-use lbs::Client;
 
-fn client<C: Send + Sync + Fn() + 'static>(lobby_id: String, ident: String, callback: C) {
+// External Dependencies ------------------------------------------------------
+use lbs::{Client, Event, NetworkConfig};
 
-    thread::spawn(move || {
 
-        let mut action = 0;
-        let mut client: Client<String, String, String, String, String> = Client::new("127.0.0.1:7680", ident.clone()).expect("Failed to connect client.");
-        loop {
-            client.events();
-            match action {
-                0 => {
+// Configuration --------------------------------------------------------------
+#[derive(Debug, Clone)]
+struct Config;
+
+impl NetworkConfig for Config {
+    type LobbyId = String;
+    type LobbyPayload = String;
+    type ConnectionIdentifier = String;
+    type PreferenceKey = String;
+    type PreferenceValue = String;
+}
+
+fn client(lobby_id: String, ident: String, action: &str) {
+
+    let mut client: Client<Config> = Client::new("127.0.0.1:7680", ident.clone()).expect("Failed to connect client.");
+    loop {
+        for event in client.events() {
+            match event {
+                Event::Connected => {
                     client.identify(ident.clone());
                 },
-                20 => {
-                    println!("[Client] Create lobby...");
-                    client.create_lobby(lobby_id.clone());
-                    callback();
+                Event::Ready(ident, addr) => {
+                    println!("[Client {}] Ready on UDP {}", ident, addr);
+                    if action == "create" {
+                        client.lobby_create(lobby_id.clone());
+
+                    } else if action == "join" {
+                        client.lobby_join(lobby_id.clone(), None);
+                    }
                 },
-                _ => {}
+                Event::LobbyJoined(id, connections, pref) => {
+                    println!("[Client {}] Lobby joined {} {:?} {:?}", ident, id, connections, pref);
+                },
+                Event::LobbyJoinRequest(id, conn, payload) => {
+                    println!("[Client {}] Lobby join requested by {:?} {:?}", ident, conn, payload);
+                    client.lobby_allow_join(conn);
+                },
+                Event::LobbyPreferenceRequest(id, conn, key, value) => {
+                    println!("[Client {}] Lobby pref by {:?} {}={}", ident, conn, key, value);
+                    client.lobby_set_preference(key, value);
+                    //client.allow_lobby_join(id, addr);
+                },
+                Event::LobbyUpdated(id, connections, pref) => {
+                    println!("[Client {}] Lobby updated {} {:?} {:?}", ident, id, connections, pref);
+                },
+                Event::LobbyLeft(id) => {
+                    println!("[Client {}] Lobby left {}", ident, id);
+                },
+                Event::LobbyStarted(id, socket, connections, pref) => {
+                    println!("[Client {}] Lobby started {} {:?} {:?}", ident, id, connections, pref);
+                }
             }
-            thread::sleep(Duration::from_millis(30));
-            action += 1;
+
         }
-    });
+        thread::sleep(Duration::from_millis(30));
+    }
 
 }
 
 fn main() {
-
-    client("Foo".to_string(), "Ivo".to_string(), || {
-        client("Foo".to_string(), "Marko".to_string(), || {
-
-        });
-    });
-
+    let arg: String = env::args().skip(1).next().unwrap_or_else(|| "create".to_string());
+    client("Foo".to_string(), "Ivo".to_string(), arg.as_str());
 }
 

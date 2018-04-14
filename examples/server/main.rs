@@ -8,15 +8,38 @@
 
 // Crates ---------------------------------------------------------------------
 extern crate lbs;
+extern crate log;
+extern crate chrono;
 
 
 // External Dependencies ------------------------------------------------------
-use lbs::Server;
+use lbs::{NetworkConfig, Server};
+
+
+// Modules --------------------------------------------------------------------
+mod logger;
+
+
+// Configuration --------------------------------------------------------------
+#[derive(Debug, Clone)]
+struct Config;
+
+impl NetworkConfig for Config {
+    type LobbyId = String;
+    type LobbyPayload = String;
+    type ConnectionIdentifier = String;
+    type PreferenceKey = String;
+    type PreferenceValue = String;
+}
 
 
 // Very Basic Lobby Server Setup ----------------------------------------------
 fn main() {
-    let server: Server<String, String, String, String, String> = Server::new(10);
+
+    logger::Logger::init().expect("Fatal: Failed to create logger!");
+
+    let server: Server<Config> = Server::new(10);
     server.listen("0.0.0.0:7680").expect("Failed to start server.");
+
 }
 

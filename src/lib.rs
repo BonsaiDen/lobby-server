@@ -13,12 +13,14 @@ extern crate serde_derive;
 extern crate serde;
 extern crate bincode;
 extern crate rand;
+#[macro_use]
+extern crate log;
 
 
 // STD Dependencies -----------------------------------------------------------
 use std::hash::Hash;
-use std::fmt::Display;
 use std::net::SocketAddr;
+use std::fmt::{Display, Debug};
 
 
 // External Dependencies ------------------------------------------------------
@@ -32,74 +34,63 @@ mod server;
 
 
 // Traits ---------------------------------------------------------------------
-pub trait NetworkProperty: Hash + Eq + Serialize + DeserializeOwned + Display + Clone {}
+pub trait NetworkProperty: Hash + Eq + Serialize + DeserializeOwned + Display + Debug + Clone {}
+
 impl NetworkProperty for String {}
 
-/*
-pub struct Preference<K: NetworkProperty, V: NetworkProperty> {
-    key: K,
-    value: V,
-    public: bool
+impl NetworkProperty for u8 {}
+impl NetworkProperty for u16 {}
+impl NetworkProperty for u32 {}
+impl NetworkProperty for u64 {}
+
+impl NetworkProperty for i8 {}
+impl NetworkProperty for i16 {}
+impl NetworkProperty for i32 {}
+impl NetworkProperty for i64 {}
+
+pub trait NetworkConfig: Debug + Clone {
+    type LobbyId: NetworkProperty;
+    type LobbyPayload: NetworkProperty;
+    type ConnectionIdentifier: NetworkProperty;
+    type PreferenceKey: NetworkProperty;
+    type PreferenceValue: NetworkProperty;
 }
-
-impl<K: NetworkProperty, V: NetworkProperty> Preference<K, V> {
-
-    pub fn public(key: K, value: V) -> Self {
-        Self {
-            key,
-            value,
-            public: true
-        }
-    }
-
-    pub fn private(key: K, value: V) -> Self {
-        Self {
-            key,
-            value,
-            public: false
-        }
-    }
-
-    fn key()
-
-}*/
 
 
 // Enums ----------------------------------------------------------------------
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(bound(deserialize = ""))]
-enum Message<T, S, I, K, V> where T: NetworkProperty,
-                               S: NetworkProperty,
-                               I: NetworkProperty,
-                               K: NetworkProperty,
-                               V: NetworkProperty
-{
-    IdentifyAction(I),
+enum Message<C> where C: NetworkConfig {
+    IdentifyAction(C::ConnectionIdentifier),
     ReadyAction,
     UdpAddressAction(SocketAddr),
-    LobbyJoinAction {
-        id: T,
-        secret: Option<S>
-    },
-    LobbyPreferenceAction(K, V, bool),
+    LobbyCreateAction(C::LobbyId),
+    LobbyJoinAction(C::LobbyId, Option<C::LobbyPayload>),
+    LobbyPreferenceAction(C::PreferenceKey, C::PreferenceValue, bool),
     LobbyLeaveAction,
     LobbyStartAction,
     LobbyJoinEvent {
-        id: T,
+        id: C::LobbyId,
         addr: SocketAddr,
-        ident: I,
-        is_local: bool,
+        ident: C::ConnectionIdentifier,
         is_owner: bool
     },
+    LobbyJoinResponseAction(SocketAddr, bool),
     IdentifyEvent(u32),
     UdpAddressEvent(SocketAddr),
     LobbyLeaveEvent(SocketAddr),
-    LobbyStartEvent(T),
-    LobbyPreferenceEvent(T, K, V),
-    LobbyCreateEvent(T),
-    LobbyDestroyEvent(T),
-    InvalidLobby(T),
-    InvalidLobbySecret(T),
+    LobbyStartEvent(C::LobbyId),
+    LobbyJoinRequestEvent {
+        id: C::LobbyId,
+        ident: C::ConnectionIdentifier,
+        addr: SocketAddr,
+        payload: Option<C::LobbyPayload>
+    },
+    LobbyPreferenceEvent(C::LobbyId, C::PreferenceKey, C::PreferenceValue),
+    LobbyPreferenceRequestEvent(C::LobbyId, C::ConnectionIdentifier, SocketAddr, C::PreferenceKey, C::PreferenceValue),
+    LobbyCreateEvent(C::LobbyId),
+    LobbyDestroyEvent(C::LobbyId),
+    InvalidLobby(C::LobbyId),
     InvalidAddress,
     InvalidAction
 }

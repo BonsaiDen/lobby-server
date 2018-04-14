@@ -8,4 +8,8 @@ rand = "*"
 serde = "*"
 serde_derive = "*"
 bincode = "*"
+log = { version = "0.4", features = ["std"] }
+
+[dev-dependencies]
+chrono = "0.4"
 

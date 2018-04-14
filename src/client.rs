@@ -8,7 +8,6 @@
 
 
 // STD Dependencies -----------------------------------------------------------
-use std::marker::PhantomData;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Read, Write};
 use std::net::{UdpSocket, TcpStream, ToSocketAddrs, SocketAddr};
@@ -19,50 +18,34 @@ use bincode;
 
 
 // Internal Dependencies ------------------------------------------------------
-use ::{NetworkProperty, Message};
+use ::{NetworkConfig, Message};
 
-
-pub enum Event<
-    LobbyId: NetworkProperty,
-    Identifier: NetworkProperty
-> {
+pub enum Event<C: NetworkConfig> {
     Connected,
-    Ready(Identifier, SocketAddr),
-    LobbyJoined(LobbyId, Vec<(Identifier, SocketAddr)>),
-    LobbyUpdated(LobbyId, Vec<(Identifier, SocketAddr)>),
-    LobbyLeft(LobbyId),
-    LobbyStarted(LobbyId, UdpSocket, Vec<(Identifier, SocketAddr)>)
+    Ready(C::ConnectionIdentifier, SocketAddr),
+    LobbyJoined(C::LobbyId, Vec<Connection<C>>, HashMap<C::PreferenceKey, C::PreferenceValue>),
+    LobbyJoinRequest(C::LobbyId, Connection<C>, Option<C::LobbyPayload>),
+    LobbyPreferenceRequest(C::LobbyId, Connection<C>, C::PreferenceKey, C::PreferenceValue),
+    LobbyUpdated(C::LobbyId, Vec<Connection<C>>, HashMap<C::PreferenceKey, C::PreferenceValue>),
+    LobbyLeft(C::LobbyId),
+    LobbyStarted(C::LobbyId, UdpSocket, Vec<Connection<C>>, HashMap<C::PreferenceKey, C::PreferenceValue>)
 }
 
 // Client Implementation ------------------------------------------------------
-pub struct Client<
-    LobbyId: NetworkProperty,
-    LobbySecret: NetworkProperty,
-    Identifier: NetworkProperty,
-    Key: NetworkProperty,
-    Value: NetworkProperty
->{
+pub struct Client<C: NetworkConfig> {
     stream: TcpStream,
     connected: bool,
-    lobby: Option<Lobby<LobbyId, Identifier, Key, Value>>,
+    lobby: Option<Lobby<C>>,
     // lobbies: HashMap<LobbyId, Lobby<LobbyId, Key, Value>>,
     udp_socket: UdpSocket,
     udp_token: Option<u32>,
     udp_address: Option<SocketAddr>,
-    ident: Identifier,
-    _secret: PhantomData<LobbySecret>
+    ident: C::ConnectionIdentifier
 }
 
-impl<
-    LobbyId: NetworkProperty,
-    LobbySecret: NetworkProperty,
-    Identifier: NetworkProperty,
-    Key: NetworkProperty,
-    Value: NetworkProperty
+impl<C: NetworkConfig> Client<C> {
 
-> Client<LobbyId, LobbySecret, Identifier, Key, Value> {
-
-    pub fn new<A: ToSocketAddrs>(address: A, ident: Identifier) -> Result<Self, Error> {
+    pub fn new<A: ToSocketAddrs>(address: A, ident: C::ConnectionIdentifier) -> Result<Self, Error> {
         let stream = TcpStream::connect(address)?;
         stream.set_nodelay(true)?;
         stream.set_nonblocking(true)?;
@@ -74,28 +57,92 @@ impl<
             udp_socket: UdpSocket::bind("0.0.0.0:0")?,
             udp_token: None,
             udp_address: None,
-            ident,
-            _secret: PhantomData
+            ident
         })
     }
 
-    pub fn identify(&mut self, ident: Identifier) {
-        self.send(Message::IdentifyAction(ident));
+    pub fn identify(&mut self, ident: C::ConnectionIdentifier) {
+        self.send(&Message::IdentifyAction(ident));
     }
 
-    pub fn create_lobby(&mut self, id: LobbyId) -> bool {
-        self.send(Message::LobbyJoinAction {
-            id,
-            secret: None
-        });
-        true
+    pub fn lobby_create(&mut self, id: C::LobbyId) -> bool {
+        if self.lobby.is_none() {
+            self.send(&Message::LobbyCreateAction(id));
+            true
+
+        } else {
+            false
+        }
     }
 
-    pub fn join_lobby(&mut self, id: LobbyId) -> bool {
-        false
+    pub fn lobby_join(&mut self, id: C::LobbyId, payload: Option<C::LobbyPayload>) -> bool {
+        if self.lobby.is_none() {
+            self.send(&Message::LobbyJoinAction(id, payload));
+            true
+
+        } else {
+            false
+        }
     }
 
-    pub fn events(&mut self) -> impl Iterator<Item = Event<LobbyId, Identifier>> {
+    pub fn lobby_allow_join(&mut self, conn: Connection<C>) -> bool {
+        if self.lobby.is_some() {
+            self.send(&Message::LobbyJoinResponseAction(conn.addr, true));
+            true
+
+        } else {
+            false
+        }
+    }
+
+    pub fn lobby_deny_join(&mut self, conn: Connection<C>) -> bool {
+        if self.lobby.is_some() {
+            self.send(&Message::LobbyJoinResponseAction(conn.addr, false));
+            true
+
+        } else {
+            false
+        }
+    }
+
+    pub fn lobby_set_preference(&mut self, key: C::PreferenceKey, value: C::PreferenceValue) -> bool {
+        if self.lobby.is_some() {
+            self.send(&Message::LobbyPreferenceAction(key, value, false));
+            true
+
+        } else {
+            false
+        }
+    }
+
+    pub fn lobby_start(&mut self) -> bool {
+        let addr = self.udp_address.clone();
+        let is_owner = if let Some(lobby) = self.lobby.as_mut() {
+            lobby.connections.iter().any(|c| c.is_owner && Some(c.addr) == addr)
+
+        } else {
+            false
+        };
+        if is_owner {
+            self.send(&Message::LobbyStartAction);
+            true
+
+        } else{
+            false
+        }
+    }
+
+    pub fn lobby_leave(&mut self) -> bool {
+        if self.lobby.is_none() {
+            self.send(&Message::LobbyLeaveAction);
+            false
+
+        } else {
+            true
+        }
+    }
+
+    pub fn events(&mut self) -> impl Iterator<Item = Event<C>> {
 
         let mut events = Vec::new();
         if !self.connected {
@@ -113,66 +160,106 @@ impl<
                         self.udp_address = Some(addr);
                         events.push(Event::Ready(self.ident.clone(), addr));
                     },
-                    Message::LobbyCreateEvent(id) => {
+                    Message::LobbyCreateEvent(_) => {
                         // println!("[Client {}] Lobby created {}", self.ident, id);
                         // TODO lobbies updated
                     },
-                    Message::LobbyDestroyEvent(id) => {
+                    Message::LobbyDestroyEvent(_) => {
                         // println!("[Client {}] Lobby destroy {}", self.ident, id);
                         // TODO lobbies updated
                     },
-                    Message::LobbyJoinEvent { id, addr, ident, is_local, is_owner } => {
+                    Message::LobbyJoinRequestEvent { id, ident, addr, payload } => {
+                        events.push(Event::LobbyJoinRequest(id, Connection {
+                            ident,
+                            addr,
+                            is_owner: false,
+                            is_local: false
 
-                        if self.lobby.is_none() {
-                            self.lobby = Some(Lobby {
-                                id,
-                                connections: Vec::new(),
-                                preferences: HashMap::new()
-                            });
-                        }
-
-                        // TODO de-duplicate updates?
-                        if let Some(lobby) = self.lobby.as_mut() {
-                            lobby.connections.push((ident, addr));
-                            if is_local {
-                                events.push(Event::LobbyJoined(lobby.id.clone(), lobby.connections.clone()));
-
-                            } else {
-                                events.push(Event::LobbyUpdated(lobby.id.clone(), lobby.connections.clone()));
+                        }, payload));
+                    },
+                    Message::LobbyJoinEvent { id, addr, ident, is_owner } => {
+                        if let Some(local_addr) = self.udp_address {
+                            if self.lobby.is_none() {
+                                self.lobby = Some(Lobby {
+                                    id,
+                                    connections: Vec::new(),
+                                    preferences: HashMap::new()
+                                });
                             }
-                        }
 
-                    },
-                    // TODO public / private preferences
-                    Message::LobbyPreferenceEvent(id, key, value) => {
-                        if let Some(lobby) = self.lobby.as_mut() {
-                            if lobby.id == id {
-                                println!("[Client {}] Lobby pref {} {} => {}", self.ident, id, key, value);
-                            }
-                        }
-                    },
-                    Message::LobbyStartEvent(id) => {
-                        if let Some(lobby) = self.lobby.as_mut() {
-                            events.push(Event::LobbyStarted(
-                                lobby.id.clone(),
-                                self.udp_socket.try_clone().unwrap(),
-                                lobby.connections.clone()
-                            ));
-                        }
-                    },
-                    Message::LobbyLeaveEvent(addr) => {
-                        if let Some(lobby) = self.lobby.as_mut() {
-                            if let Some(local_addr) = self.udp_address {
-                                if local_addr == addr {
-                                    events.push(Event::LobbyLeft(lobby.id.clone()));
+                            // TODO de-duplicate updates?
+                            let is_local = self.is_local(addr);
+                            if let Some(lobby) = self.lobby.as_mut() {
+                                lobby.connections.push(Connection {
+                                    ident,
+                                    addr,
+                                    is_local,
+                                    is_owner
+                                });
+                                if addr == local_addr {
+                                    events.push(Event::LobbyJoined(lobby.id.clone(), lobby.connections.clone(), lobby.preferences.clone()));
 
                                 } else {
-                                    events.push(Event::LobbyUpdated(lobby.id.clone(), lobby.connections.clone()));
+                                    events.push(Event::LobbyUpdated(lobby.id.clone(), lobby.connections.clone(), lobby.preferences.clone()));
                                 }
                             }
                         }
                     },
-                    Message::InvalidLobby(id) => {
+                    Message::LobbyPreferenceEvent(id, key, value) => {
+                        // TODO public preferences on other lobbies
+                        if let Some(lobby) = self.lobby.as_mut() {
+                            if lobby.id == id {
+                                lobby.preferences.insert(key, value);
+                                events.push(Event::LobbyUpdated(lobby.id.clone(), lobby.connections.clone(), lobby.preferences.clone()));
+                            }
+                        }
+                    },
+                    Message::LobbyPreferenceRequestEvent(id, ident, addr, key, value) => {
+                        if let Some(lobby) = self.lobby.as_mut() {
+                            if lobby.id == id {
+                                events.push(Event::LobbyPreferenceRequest(id, Connection {
+                                    ident,
+                                    addr,
+                                    is_local: false,
+                                    is_owner: false
+
+                                }, key, value));
+                            }
+                        }
+                    },
+                    Message::LobbyStartEvent(_) => {
+                        if let Some(lobby) = self.lobby.take() {
+                            events.push(Event::LobbyStarted(
+                                lobby.id,
+                                self.udp_socket.try_clone().unwrap(),
+                                lobby.connections,
+                                lobby.preferences
+                            ));
+                        }
+                    },
+                    Message::LobbyLeaveEvent(addr) => {
+                        let is_local = self.is_local(addr);
+                        let left = if let Some(lobby) = self.lobby.as_mut() {
+                            lobby.connections.retain(|conn| conn.addr != addr);
+                            if is_local {
+                                events.push(Event::LobbyLeft(lobby.id.clone()));
+                                true
+
+                            } else {
+                                events.push(Event::LobbyUpdated(lobby.id.clone(), lobby.connections.clone(), lobby.preferences.clone()));
+                                true
+                            }
+
+                        } else {
+                            false
+                        };
+
+                        if left {
+                            self.lobby = None;
+                        }
+
+                    },
+                    Message::InvalidLobby(_) => {
 
                     },
                     Message::InvalidAddress => {
@@ -189,10 +276,7 @@ impl<
 
         if let Some(token) = self.udp_token {
             let buffer: [u8; 8] = [
-                14,
-                71,
-                128,
-                5,
+                14, 71, 128, 5,
                 (token >> 24) as u8,
                 (token >> 16) as u8,
                 (token >> 8) as u8,
@@ -205,7 +289,16 @@ impl<
 
     }
 
-    fn receive(&mut self) -> Result<Vec<Message<LobbyId, LobbySecret, Identifier, Key, Value>>, ()> {
+    fn is_local(&self, addr: SocketAddr) -> bool {
+        if let Some(local_addr) = self.udp_address {
+            local_addr == addr
+
+        } else {
+            false
+        }
+    }
+
+    fn receive(&mut self) -> Result<Vec<Message<C>>, ()> {
         let mut buffer: [u8; 255] = [0; 255];
         match self.stream.read(&mut buffer) {
             Ok(bytes) => {
@@ -215,8 +308,8 @@ impl<
                 } else  {
                     let mut offset = 0;
                     let mut messages = Vec::new();
-                    while let Ok(msg) = bincode::deserialize::<Message<LobbyId, LobbySecret, Identifier, Key, Value>>(&buffer[offset..]) {
-                        offset += bincode::serialized_size::<Message<LobbyId, LobbySecret, Identifier, Key, Value>>(&msg).unwrap_or(0) as usize;
+                    while let Ok(msg) = bincode::deserialize::<Message<C>>(&buffer[offset..]) {
+                        offset += bincode::serialized_size::<Message<C>>(&msg).unwrap_or(0) as usize;
                         messages.push(msg);
                         if offset >= bytes {
                             break;
@@ -236,51 +329,24 @@ impl<
         }
     }
 
-    fn send(&mut self, msg: Message<LobbyId, LobbySecret, Identifier, Key, Value>) {
-        let msg = bincode::serialize(&msg).unwrap();
+    fn send(&mut self, msg: &Message<C>) {
+        let msg = bincode::serialize(msg).unwrap();
         self.stream.write_all(&msg).ok();
     }
 
-    fn close(&mut self) {
-
-    }
-
 }
 
-pub struct Lobby<LobbyId: NetworkProperty, Identifier: NetworkProperty, Key: NetworkProperty, Value: NetworkProperty> {
-    id: LobbyId,
-    connections: Vec<(Identifier, SocketAddr)>,
-    preferences: HashMap<Key, Value>
-    // actions: Vec<Message<LobbyId, Key, Value>>
+#[derive(Debug, Clone)]
+pub struct Connection<C: NetworkConfig> {
+    ident: C::ConnectionIdentifier,
+    addr: SocketAddr,
+    is_local: bool,
+    is_owner: bool
 }
 
-impl<
-    LobbyId: NetworkProperty,
-    Identifier: NetworkProperty,
-    Key: NetworkProperty,
-    Value: NetworkProperty
-
-> Lobby<LobbyId, Identifier, Key, Value> {
-
-    pub fn id(&self) -> LobbyId {
-        self.id.clone()
-    }
-
-    pub fn set_preference(&mut self, key: Key, value: Value) {
-
-    }
-
-    pub fn preferences(&self) -> &HashMap<Key, Value> {
-        &self.preferences
-    }
-
-    pub fn start(&mut self) {
-
-    }
-
-    pub fn leave(&mut self) {
-
-    }
-
+pub struct Lobby<C: NetworkConfig> {
+    id: C::LobbyId,
+    connections: Vec<Connection<C>>,
+    preferences: HashMap<C::PreferenceKey, C::PreferenceValue>
 }
 
