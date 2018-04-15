@@ -21,9 +21,9 @@ extern crate log;
 use std::fmt;
 use std::hash::Hash;
 use std::ops::Deref;
+use std::collections::HashMap;
 use std::fmt::{Display, Debug};
 use std::net::{IpAddr, Ipv4Addr, UdpSocket, SocketAddr};
-use std::collections::HashMap;
 
 
 // External Dependencies ------------------------------------------------------
@@ -52,7 +52,7 @@ impl NetworkProperty for i16 {}
 impl NetworkProperty for i32 {}
 impl NetworkProperty for i64 {}
 
-pub trait NetworkConfig: Debug + Clone {
+pub trait NetworkConfig: Debug + Clone + Serialize + DeserializeOwned {
     type LobbyId: NetworkProperty;
     type LobbyPayload: NetworkProperty;
     type ConnectionIdentifier: NetworkProperty;
@@ -164,56 +164,68 @@ impl Deref for TcpAddress {
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(bound(deserialize = ""))]
 enum Message<C> where C: NetworkConfig {
-    IdentifyAction(C::ConnectionIdentifier),
-    ReadyAction,
-    UdpAddressAction(UdpAddress),
-    LobbyCreateAction(C::LobbyId),
-    LobbyJoinAction(C::LobbyId, Option<C::LobbyPayload>),
-    LobbyPreferenceAction {
+    ClientAction(ClientAction<C>),
+    ServerEvent(ServerEvent<C>)
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(bound(deserialize = ""))]
+enum ClientAction<C> where C: NetworkConfig {
+    Identify(C::ConnectionIdentifier),
+    Ready,
+    UdpAddress(UdpAddress),
+    LobbyCreate(C::LobbyId),
+    LobbyJoin(C::LobbyId, Option<C::LobbyPayload>),
+    LobbyPreference {
         key: C::PreferenceKey,
         value: C::PreferenceValue,
         is_public: bool
     },
-    LobbyLeaveAction,
-    LobbyStartAction,
-    LobbyJoinEvent {
+    LobbyLeave,
+    LobbyStart,
+    LobbyJoinResponse(UdpAddress, bool),
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(bound(deserialize = ""))]
+enum ServerEvent<C> where C: NetworkConfig {
+    Identify(UdpToken),
+    UdpAddress(UdpAddress),
+    LobbyJoin {
         id: C::LobbyId,
         addr: UdpAddress,
         ident: C::ConnectionIdentifier,
         is_owner: bool
     },
-    LobbyJoinResponseAction(UdpAddress, bool),
-    IdentifyEvent(UdpToken),
-    UdpAddressEvent(UdpAddress),
-    LobbyLeaveEvent(UdpAddress),
-    LobbyStartEvent(C::LobbyId),
-    LobbyJoinRequestEvent {
+    LobbyLeave(UdpAddress),
+    LobbyStart(C::LobbyId),
+    LobbyJoinRequest {
         id: C::LobbyId,
         ident: C::ConnectionIdentifier,
         addr: UdpAddress,
         payload: Option<C::LobbyPayload>
     },
-    LobbyPreferenceEvent {
+    LobbyPreference {
         id: C::LobbyId,
         key: C::PreferenceKey,
         value: C::PreferenceValue
     },
-    LobbyPreferenceRequestEvent {
+    LobbyPreferenceRequest {
         id: C::LobbyId,
         ident: C::ConnectionIdentifier,
         addr: UdpAddress,
         key: C::PreferenceKey,
         value: C::PreferenceValue
     },
-    LobbyCreateEvent(C::LobbyId),
-    LobbyDestroyEvent(C::LobbyId),
+    LobbyCreate(C::LobbyId),
+    LobbyDestroy(C::LobbyId),
     Error(Error<C::LobbyId>)
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(bound(deserialize = ""))]
 pub enum Error<LobbyId: NetworkProperty> {
-    InvalidAction,
+    AlreadyIdentified,
     AlreadyInLobby(LobbyId),
     NotInAnyLobby,
     LobbyJoinDenied(LobbyId),
@@ -225,6 +237,7 @@ pub enum Error<LobbyId: NetworkProperty> {
 
 pub enum Event<C: NetworkConfig> {
     Connected,
+    Disconnected,
     Ready(C::ConnectionIdentifier, UdpAddress),
     LobbyJoined(C::LobbyId, Vec<Connection<C>>, HashMap<C::PreferenceKey, C::PreferenceValue>),
     LobbyJoinRequest(C::LobbyId, Connection<C>, Option<C::LobbyPayload>),

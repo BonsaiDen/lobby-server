@@ -6,10 +6,14 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+
 // Crates ---------------------------------------------------------------------
+#[macro_use]
+extern crate serde_derive;
+extern crate serde;
+extern crate chrono;
 extern crate lbs;
 extern crate log;
-extern crate chrono;
 
 
 // External Dependencies ------------------------------------------------------
@@ -21,7 +25,7 @@ mod logger;
 
 
 // Configuration --------------------------------------------------------------
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Config;
 
 impl NetworkConfig for Config {

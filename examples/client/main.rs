@@ -7,6 +7,9 @@
 // except according to those terms.
 
 // Crates ---------------------------------------------------------------------
+#[macro_use]
+extern crate serde_derive;
+extern crate serde;
 extern crate lbs;
 
 
@@ -21,7 +24,7 @@ use lbs::{Client, Event, NetworkConfig};
 
 
 // Configuration --------------------------------------------------------------
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Config;
 
 impl NetworkConfig for Config {
@@ -70,6 +73,13 @@ fn client(lobby_id: String, ident: String, action: &str) {
                 },
                 Event::LobbyStarted(id, socket, connections, pref) => {
                     println!("[Client {}] Lobby started {} {:?} {:?}", ident, id, connections, pref);
+                    // TODO start communication with all other connections
+                },
+                Event::Error(err) => {
+                    println!("[Client {}] Error {:?}", ident, err);
+                },
+                Event::Disconnected => {
+                    println!("[Client {}] Disconnected", ident);
                 }
             }
 

@@ -18,19 +18,28 @@ use bincode;
 
 
 // Internal Dependencies ------------------------------------------------------
-use ::{Event, NetworkConfig, Message, UdpToken, UdpAddress};
+use ::{ClientAction, Event, NetworkConfig, Message, UdpToken, UdpAddress, ServerEvent};
+
+
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum ClientState {
+    Connecting,
+    Connected,
+    Disconnecting,
+    Disconnected
+}
 
 
 // Client Implementation ------------------------------------------------------
 pub struct Client<C: NetworkConfig> {
     stream: TcpStream,
-    connected: bool,
+    state: ClientState,
     lobby: Option<Lobby<C>>,
-    // lobbies: HashMap<LobbyId, Lobby<LobbyId, Key, Value>>,
     udp_socket: UdpSocket,
     udp_token: Option<UdpToken>,
     udp_address: Option<UdpAddress>,
     ident: C::ConnectionIdentifier
+    // lobbies: HashMap<LobbyId, Lobby<LobbyId, Key, Value>>,
 }
 
 impl<C: NetworkConfig> Client<C> {
@@ -42,23 +51,22 @@ impl<C: NetworkConfig> Client<C> {
         Ok(Self {
             stream,
             lobby: None,
-            connected: false,
-            // lobbies: HashMap::new(),
+            state: ClientState::Connecting,
             udp_socket: UdpSocket::bind("0.0.0.0:0")?,
             udp_token: None,
             udp_address: None,
             ident
+            // lobbies: HashMap::new(),
         })
     }
 
-    pub fn identify(&mut self, ident: C::ConnectionIdentifier) {
-        self.send(&Message::IdentifyAction(ident));
+    pub fn identify(&mut self, ident: C::ConnectionIdentifier) -> bool {
+        self.send(&ClientAction::Identify(ident))
     }
 
     pub fn lobby_create(&mut self, id: C::LobbyId) -> bool {
         if self.lobby.is_none() {
-            self.send(&Message::LobbyCreateAction(id));
-            true
+            self.send(&ClientAction::LobbyCreate(id))
 
         } else {
             false
@@ -67,8 +75,7 @@ impl<C: NetworkConfig> Client<C> {
 
     pub fn lobby_join(&mut self, id: C::LobbyId, payload: Option<C::LobbyPayload>) -> bool {
         if self.lobby.is_none() {
-            self.send(&Message::LobbyJoinAction(id, payload));
-            true
+            self.send(&ClientAction::LobbyJoin(id, payload))
 
         } else {
             false
@@ -77,8 +84,7 @@ impl<C: NetworkConfig> Client<C> {
 
     pub fn lobby_allow_join(&mut self, conn: Connection<C>) -> bool {
         if self.lobby.is_some() {
-            self.send(&Message::LobbyJoinResponseAction(conn.addr, true));
-            true
+            self.send(&ClientAction::LobbyJoinResponse(conn.addr, true))
 
         } else {
             false
@@ -87,8 +93,7 @@ impl<C: NetworkConfig> Client<C> {
 
     pub fn lobby_deny_join(&mut self, conn: Connection<C>) -> bool {
         if self.lobby.is_some() {
-            self.send(&Message::LobbyJoinResponseAction(conn.addr, false));
-            true
+            self.send(&ClientAction::LobbyJoinResponse(conn.addr, false))
 
         } else {
             false
@@ -97,12 +102,11 @@ impl<C: NetworkConfig> Client<C> {
 
     pub fn lobby_set_preference(&mut self, key: C::PreferenceKey, value: C::PreferenceValue) -> bool {
         if self.lobby.is_some() {
-            self.send(&Message::LobbyPreferenceAction {
+            self.send(&ClientAction::LobbyPreference {
                 key,
                 value,
                 is_public: false
-            });
-            true
+            })
 
         } else {
             false
@@ -118,8 +122,7 @@ impl<C: NetworkConfig> Client<C> {
             false
         };
         if is_owner {
-            self.send(&Message::LobbyStartAction);
-            true
+            self.send(&ClientAction::LobbyStart)
 
         } else{
             false
@@ -128,8 +131,7 @@ impl<C: NetworkConfig> Client<C> {
 
     pub fn lobby_leave(&mut self) -> bool {
         if self.lobby.is_none() {
-            self.send(&Message::LobbyLeaveAction);
-            false
+            self.send(&ClientAction::LobbyLeave)
 
         } else {
             true
@@ -139,30 +141,34 @@ impl<C: NetworkConfig> Client<C> {
     pub fn events(&mut self) -> impl Iterator<Item = Event<C>> {
 
         let mut events = Vec::new();
-        if !self.connected {
+        if self.state == ClientState::Connecting {
             events.push(Event::Connected);
-            self.connected = true;
+            self.state = ClientState::Connected;
+
+        } else if self.state == ClientState::Disconnecting {
+            events.push(Event::Disconnected);
+            self.state = ClientState::Disconnected;
         }
 
         match self.receive() {
-            Ok(messages) => for m in messages {
-                match m {
-                    Message::IdentifyEvent(token) => {
+            Ok(received) => for e in received {
+                match e {
+                    ServerEvent::Identify(token) => {
                         self.udp_token = Some(token);
                     },
-                    Message::UdpAddressEvent(addr) => {
+                    ServerEvent::UdpAddress(addr) => {
                         self.udp_address = Some(addr);
                         events.push(Event::Ready(self.ident.clone(), addr));
                     },
-                    Message::LobbyCreateEvent(_) => {
+                    ServerEvent::LobbyCreate(_) => {
                         // println!("[Client {}] Lobby created {}", self.ident, id);
                         // TODO lobbies updated
                     },
-                    Message::LobbyDestroyEvent(_) => {
+                    ServerEvent::LobbyDestroy(_) => {
                         // println!("[Client {}] Lobby destroy {}", self.ident, id);
                         // TODO lobbies updated
                     },
-                    Message::LobbyJoinRequestEvent { id, ident, addr, payload } => {
+                    ServerEvent::LobbyJoinRequest { id, ident, addr, payload } => {
                         events.push(Event::LobbyJoinRequest(id, Connection {
                             ident,
                             addr,
@@ -171,7 +177,7 @@ impl<C: NetworkConfig> Client<C> {
 
                         }, payload));
                     },
-                    Message::LobbyJoinEvent { id, addr, ident, is_owner } => {
+                    ServerEvent::LobbyJoin { id, addr, ident, is_owner } => {
                         if let Some(local_addr) = self.udp_address {
                             if self.lobby.is_none() {
                                 self.lobby = Some(Lobby {
@@ -199,7 +205,7 @@ impl<C: NetworkConfig> Client<C> {
                             }
                         }
                     },
-                    Message::LobbyPreferenceEvent { id, key, value } => {
+                    ServerEvent::LobbyPreference { id, key, value } => {
                         // TODO public preferences on other lobbies
                         if let Some(lobby) = self.lobby.as_mut() {
                             if lobby.id == id {
@@ -208,7 +214,7 @@ impl<C: NetworkConfig> Client<C> {
                             }
                         }
                     },
-                    Message::LobbyPreferenceRequestEvent { id, ident, addr, key, value } => {
+                    ServerEvent::LobbyPreferenceRequest { id, ident, addr, key, value } => {
                         if let Some(lobby) = self.lobby.as_mut() {
                             if lobby.id == id {
                                 events.push(Event::LobbyPreferenceRequest(id, Connection {
@@ -221,7 +227,7 @@ impl<C: NetworkConfig> Client<C> {
                             }
                         }
                     },
-                    Message::LobbyStartEvent(_) => {
+                    ServerEvent::LobbyStart(_) => {
                         if let Some(lobby) = self.lobby.take() {
                             events.push(Event::LobbyStarted(
                                 lobby.id,
@@ -232,7 +238,7 @@ impl<C: NetworkConfig> Client<C> {
                         }
                         // TODO remove from lobby list
                     },
-                    Message::LobbyLeaveEvent(addr) => {
+                    ServerEvent::LobbyLeave(addr) => {
                         let is_local = self.is_local(addr);
                         let left = if let Some(lobby) = self.lobby.as_mut() {
                             lobby.connections.retain(|conn| conn.addr != addr);
@@ -254,10 +260,9 @@ impl<C: NetworkConfig> Client<C> {
                         }
 
                     },
-                    Message::Error(err) => {
+                    ServerEvent::Error(err) => {
                         events.push(Event::Error(err))
-                    },
-                    _ => {}
+                    }
                 }
             },
             Err(_) => {}
@@ -272,6 +277,12 @@ impl<C: NetworkConfig> Client<C> {
 
     }
 
+    pub fn close(&mut self) {
+        if self.state == ClientState::Connected {
+            self.state = ClientState::Disconnecting;
+        }
+    }
+
     fn is_local(&self, addr: UdpAddress) -> bool {
         if let Some(local_addr) = self.udp_address {
             local_addr == addr
@@ -281,28 +292,32 @@ impl<C: NetworkConfig> Client<C> {
         }
     }
 
-    fn receive(&mut self) -> Result<Vec<Message<C>>, ()> {
+    fn receive(&mut self) -> Result<Vec<ServerEvent<C>>, ()> {
         let mut buffer: [u8; 255] = [0; 255];
         match self.stream.read(&mut buffer) {
             Ok(bytes) => {
                 if bytes == 0 {
+                    self.close();
                     Err(())
 
                 } else  {
                     let mut offset = 0;
-                    let mut messages = Vec::new();
+                    let mut events = Vec::new();
                     while let Ok(msg) = bincode::deserialize::<Message<C>>(&buffer[offset..]) {
                         offset += bincode::serialized_size::<Message<C>>(&msg).unwrap_or(0) as usize;
-                        messages.push(msg);
+                        if let Message::ServerEvent(event) = msg {
+                            events.push(event);
+                        }
                         if offset >= bytes {
                             break;
                         }
                     }
-                    Ok(messages)
+                    Ok(events)
                 }
             },
             Err(err) => {
                 if err.kind() != ErrorKind::WouldBlock {
+                    self.close();
                     Err(())
 
                 } else {
@@ -312,9 +327,16 @@ impl<C: NetworkConfig> Client<C> {
         }
     }
 
-    fn send(&mut self, msg: &Message<C>) {
-        let msg = bincode::serialize(msg).unwrap();
-        self.stream.write_all(&msg).ok();
+    fn send(&mut self, msg: &ClientAction<C>) -> bool {
+        if self.state == ClientState::Connected {
+            let msg = Message::ClientAction(msg.clone());
+            let msg = bincode::serialize(&msg).unwrap();
+            self.stream.write_all(&msg).ok();
+            true
+
+        } else {
+            false
+        }
     }
 
 }
