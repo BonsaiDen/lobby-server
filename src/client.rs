@@ -10,7 +10,7 @@
 // STD Dependencies -----------------------------------------------------------
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Read, Write};
-use std::net::{UdpSocket, TcpStream, ToSocketAddrs, SocketAddr};
+use std::net::{UdpSocket, TcpStream, ToSocketAddrs};
 
 
 // External Dependencies ------------------------------------------------------
@@ -18,18 +18,8 @@ use bincode;
 
 
 // Internal Dependencies ------------------------------------------------------
-use ::{NetworkConfig, Message};
+use ::{Event, NetworkConfig, Message, UdpToken, UdpAddress};
 
-pub enum Event<C: NetworkConfig> {
-    Connected,
-    Ready(C::ConnectionIdentifier, SocketAddr),
-    LobbyJoined(C::LobbyId, Vec<Connection<C>>, HashMap<C::PreferenceKey, C::PreferenceValue>),
-    LobbyJoinRequest(C::LobbyId, Connection<C>, Option<C::LobbyPayload>),
-    LobbyPreferenceRequest(C::LobbyId, Connection<C>, C::PreferenceKey, C::PreferenceValue),
-    LobbyUpdated(C::LobbyId, Vec<Connection<C>>, HashMap<C::PreferenceKey, C::PreferenceValue>),
-    LobbyLeft(C::LobbyId),
-    LobbyStarted(C::LobbyId, UdpSocket, Vec<Connection<C>>, HashMap<C::PreferenceKey, C::PreferenceValue>)
-}
 
 // Client Implementation ------------------------------------------------------
 pub struct Client<C: NetworkConfig> {
@@ -38,8 +28,8 @@ pub struct Client<C: NetworkConfig> {
     lobby: Option<Lobby<C>>,
     // lobbies: HashMap<LobbyId, Lobby<LobbyId, Key, Value>>,
     udp_socket: UdpSocket,
-    udp_token: Option<u32>,
-    udp_address: Option<SocketAddr>,
+    udp_token: Option<UdpToken>,
+    udp_address: Option<UdpAddress>,
     ident: C::ConnectionIdentifier
 }
 
@@ -107,7 +97,11 @@ impl<C: NetworkConfig> Client<C> {
 
     pub fn lobby_set_preference(&mut self, key: C::PreferenceKey, value: C::PreferenceValue) -> bool {
         if self.lobby.is_some() {
-            self.send(&Message::LobbyPreferenceAction(key, value, false));
+            self.send(&Message::LobbyPreferenceAction {
+                key,
+                value,
+                is_public: false
+            });
             true
 
         } else {
@@ -205,7 +199,7 @@ impl<C: NetworkConfig> Client<C> {
                             }
                         }
                     },
-                    Message::LobbyPreferenceEvent(id, key, value) => {
+                    Message::LobbyPreferenceEvent { id, key, value } => {
                         // TODO public preferences on other lobbies
                         if let Some(lobby) = self.lobby.as_mut() {
                             if lobby.id == id {
@@ -214,7 +208,7 @@ impl<C: NetworkConfig> Client<C> {
                             }
                         }
                     },
-                    Message::LobbyPreferenceRequestEvent(id, ident, addr, key, value) => {
+                    Message::LobbyPreferenceRequestEvent { id, ident, addr, key, value } => {
                         if let Some(lobby) = self.lobby.as_mut() {
                             if lobby.id == id {
                                 events.push(Event::LobbyPreferenceRequest(id, Connection {
@@ -236,6 +230,7 @@ impl<C: NetworkConfig> Client<C> {
                                 lobby.preferences
                             ));
                         }
+                        // TODO remove from lobby list
                     },
                     Message::LobbyLeaveEvent(addr) => {
                         let is_local = self.is_local(addr);
@@ -259,14 +254,8 @@ impl<C: NetworkConfig> Client<C> {
                         }
 
                     },
-                    Message::InvalidLobby(_) => {
-
-                    },
-                    Message::InvalidAddress => {
-
-                    },
-                    Message::InvalidAction => {
-
+                    Message::Error(err) => {
+                        events.push(Event::Error(err))
                     },
                     _ => {}
                 }
@@ -275,13 +264,7 @@ impl<C: NetworkConfig> Client<C> {
         }
 
         if let Some(token) = self.udp_token {
-            let buffer: [u8; 8] = [
-                14, 71, 128, 5,
-                (token >> 24) as u8,
-                (token >> 16) as u8,
-                (token >> 8) as u8,
-                (token) as u8
-            ];
+            let buffer = token.into_buffer();
             self.udp_socket.send_to(&buffer, self.stream.peer_addr().unwrap()).ok();
         }
 
@@ -289,7 +272,7 @@ impl<C: NetworkConfig> Client<C> {
 
     }
 
-    fn is_local(&self, addr: SocketAddr) -> bool {
+    fn is_local(&self, addr: UdpAddress) -> bool {
         if let Some(local_addr) = self.udp_address {
             local_addr == addr
 
@@ -338,13 +321,13 @@ impl<C: NetworkConfig> Client<C> {
 
 #[derive(Debug, Clone)]
 pub struct Connection<C: NetworkConfig> {
-    ident: C::ConnectionIdentifier,
-    addr: SocketAddr,
-    is_local: bool,
-    is_owner: bool
+    pub ident: C::ConnectionIdentifier,
+    pub addr: UdpAddress,
+    pub is_local: bool,
+    pub is_owner: bool
 }
 
-pub struct Lobby<C: NetworkConfig> {
+struct Lobby<C: NetworkConfig> {
     id: C::LobbyId,
     connections: Vec<Connection<C>>,
     preferences: HashMap<C::PreferenceKey, C::PreferenceValue>
